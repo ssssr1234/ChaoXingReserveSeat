@@ -15,10 +15,48 @@ logging.basicConfig(
 )
 
 
+import requests
+from email.utils import parsedate_to_datetime
+from statistics import median
+
 from utils import reserve, get_user_credentials
 
+# 超星 Date 头相对本机的秒数（正=超星比本机快）。开火按这台钟，不按 GitHub 墙钟。
+_CX_OFFSET = 0.0
+
+
+def sync_chaoxing_clock(rounds=7):
+    global _CX_OFFSET
+    samples = []
+    for _ in range(rounds):
+        t0 = time.time()
+        try:
+            resp = requests.get(
+                "https://office.chaoxing.com/", timeout=5, verify=False
+            )
+        except requests.RequestException as err:
+            logging.warning(f"对超星钟失败: {err}")
+            continue
+        t1 = time.time()
+        hdr = resp.headers.get("Date")
+        if not hdr:
+            continue
+        srv = parsedate_to_datetime(hdr)
+        if srv.tzinfo is None:
+            srv = srv.replace(tzinfo=datetime.timezone.utc)
+        samples.append(srv.timestamp() - (t0 + t1) / 2)
+    if samples:
+        _CX_OFFSET = float(median(samples))
+    logging.info(
+        f"超星钟偏差 {_CX_OFFSET:+.3f}s （正=超星快于本机，样本 {len(samples)}）"
+    )
+    return _CX_OFFSET
+
+
 def beijing_now():
-    return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    return datetime.datetime.utcfromtimestamp(
+        time.time() + _CX_OFFSET
+    ) + datetime.timedelta(hours=8)
 
 
 def get_current_time(_action=False):
@@ -32,9 +70,9 @@ def get_current_dayofweek(_action=False):
 RUN_ONCE = True
 SLEEPTIME = 0.2  # 每次抢座的间隔
 ENDTIME = "20:02:00"  # 根据学校的预约座位时间+1min即可
-RESERVE_TIME = "20:00:03"  # 北京时间，第一枪开火（T0+3s）
+RESERVE_TIME = "20:00:01"  # 超星钟：开门后 1 秒开火（对齐已约上的 01 打 02 中）
 PREWARM_LEAD_SECONDS = 40  # 开火前完成环境预热+登录
-PACKET_LEAD_SECONDS = 14  # 开火前开始做第一枪预热包，保证 20:00:03 包已就绪
+PACKET_LEAD_SECONDS = 14  # 开火前开始做第一枪预热包
 
 ENABLE_SLIDER = True  # 是否有滑块验证
 MAX_ATTEMPT = 1  # 最大尝试次数
@@ -170,11 +208,13 @@ def main(users, action=False):
             raise Exception("USERNAMES/PASSWORDS secrets missing")
 
         logging.info(
-            f"GitHub Action 已启动，第一枪对准北京时间 {RESERVE_TIME}"
+            f"GitHub Action 已启动，第一枪对准超星钟 {RESERVE_TIME}"
         )
         prepared = {}
+        sync_chaoxing_clock()
 
         wait_until_fire(PREWARM_LEAD_SECONDS)
+        sync_chaoxing_clock()
         logging.info("开始预约前预热并登录...")
         clients = create_reserve_clients(len(users))
         for index, user in enumerate(users):
@@ -197,8 +237,11 @@ def main(users, action=False):
             )
 
         now, remaining = wait_until_fire(0)
+        wall = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
         logging.info(
-            f"到达开火时间: {now.strftime('%H:%M:%S.%f')[:-3]} remaining={remaining:.3f}s，打第一枪"
+            f"到达开火 超星钟={now.strftime('%H:%M:%S.%f')[:-3]} "
+            f"墙钟={wall.strftime('%H:%M:%S.%f')[:-3]} "
+            f"offset={_CX_OFFSET:+.3f}s remaining={remaining:.3f}s，打第一枪"
         )
 
     if clients is None:

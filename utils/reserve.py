@@ -309,10 +309,9 @@ class reserve:
             return None
         captcha = ""
         if self.enable_slider:
-            captcha = self.resolve_captcha()
+            captcha = self.resolve_captcha() or ""
             if not captcha:
-                logging.warning(f"座位 {seat} 做包失败：验证码失败")
-                return None
+                logging.warning(f"座位 {seat} 验证码未通过，仍保留 token 进入冲刺")
         packet = {
             "times": times,
             "roomid": roomid,

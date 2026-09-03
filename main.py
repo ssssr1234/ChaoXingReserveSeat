@@ -21,18 +21,22 @@ from statistics import median
 
 from utils import reserve, get_user_credentials
 
-# 超星 Date 头相对本机的秒数（正=超星比本机快）。开火按这台钟，不按 GitHub 墙钟。
+# 超星 Date 头相对本机的秒数（正=超星快于本机）。开火按这台钟，不按 GitHub 墙钟。
 _CX_OFFSET = 0.0
 
 
-def sync_chaoxing_clock(rounds=7):
+def sync_chaoxing_clock(rounds=3):
+    """安师大 exe server_offset：3 次 Date 头取中位数。不跟随跳转，避免绕到 cxlowcode 拖时间。"""
     global _CX_OFFSET
     samples = []
     for _ in range(rounds):
         t0 = time.time()
         try:
             resp = requests.get(
-                "https://office.chaoxing.com/", timeout=5, verify=False
+                "https://office.chaoxing.com/",
+                timeout=5,
+                verify=False,
+                allow_redirects=False,
             )
         except requests.RequestException as err:
             logging.warning(f"对超星钟失败: {err}")
@@ -68,43 +72,30 @@ def get_current_dayofweek(_action=False):
 
 
 RUN_ONCE = True
-SLEEPTIME = 0.1  # 与安师大 exe sleep_time 一致
+SLEEPTIME = 0.1  # 安师大 exe sleep_time
 ENDTIME = "20:02:00"
 OPEN_TIME = "20:00:00"
 SPRINT_LEAD_MS = 300  # 开放前 0.3 秒开火
-SPRINT_PREP_SECONDS = 4  # 开放前 4 秒做预热包
+SPRINT_PREP_SECONDS = 4  # 等到 t0-4 秒才开始做第一座的包
 RUN_SECONDS = 6  # 狂刷时长
 RESERVE_TIME = "20:00:00"
-PREWARM_LEAD_SECONDS = 40
-PACKET_LEAD_SECONDS = 14
+LOGIN_LEAD_SECONDS = 20  # 对齐 exe：约 19:59:40 登录，再等到 t0-4 做包
 
-ENABLE_SLIDER = True  # 是否有滑块验证
-MAX_ATTEMPT = 1  # 最大尝试次数
-RESERVE_NEXT_DAY = True  # 预约明天而不是今天的
+ENABLE_SLIDER = True
+MAX_ATTEMPT = 1
+RESERVE_NEXT_DAY = True
 POST_LOGIN_DELAY = 0.0
-RETRY_INTERVAL = 15.0    # 整批失败后等待15秒
-
-
-def wait_until_fire(lead_seconds=0):
-    """Block until Beijing clock reaches RESERVE_TIME minus lead_seconds."""
-    fire_clock = datetime.datetime.strptime(RESERVE_TIME, "%H:%M:%S").time()
-    while True:
-        now = beijing_now()
-        target = datetime.datetime.combine(now.date(), fire_clock)
-        if (now - target).total_seconds() > 12 * 3600:
-            target += datetime.timedelta(days=1)
-        remaining = (target - now).total_seconds() - lead_seconds
-        if remaining <= 0:
-            return now, (target - now).total_seconds()
-        time.sleep(1 if remaining > 10 else 0.01)
+RETRY_INTERVAL = 15.0
 
 
 def precise_sleep_until(ts):
+    """与安师大 exe Reserver.precise_sleep_until 相同：>0.3s 睡 remain-0.2，最后忙等。"""
     while True:
         remain = ts - time.time()
         if remain <= 0:
             return
-        time.sleep(1.0 if remain > 10 else 0.01)
+        if remain > 0.3:
+            time.sleep(remain - 0.2)
 
 
 def exe_fire_timestamps():
@@ -122,14 +113,28 @@ def exe_fire_timestamps():
 
 
 def exe_sprint_reserve(client, times, roomid, seatid, action, fire_at, prep_at):
+    """安师大 exe run() 冲刺：等到 t0-4 做第一座包 → 等到开火 → 预热包只用一次 → 其余现场做包。"""
     seats = client._normalize_seat_ids(seatid)
-    precise_sleep_until(prep_at)
+    day_delta = 1 if client.reserve_next_day else 0
+    day = (
+        datetime.datetime.utcnow() + datetime.timedelta(hours=8, days=day_delta)
+    ).strftime("%Y-%m-%d")
+    logging.info(
+        f"目标 {day}  房间 {roomid}  座位 {seats}  时间 {times[0]}-{times[1]}"
+    )
+    if time.time() < prep_at:
+        precise_sleep_until(prep_at)
     prewarm = None
     first = seats[0]
-    pkt = client.prepare_packet(times, roomid, first, action)
-    if pkt:
-        logging.info(f"预热完成：座位 {first} 的 token/验证码已备好")
-        prewarm = pkt
+    try:
+        pkt = client.prepare_packet(times, roomid, first, action)
+        if pkt:
+            logging.info(f"预热完成：座位 {first} 的 token/验证码已备好")
+            prewarm = pkt
+        else:
+            logging.warning("预热失败（忽略，改为实时解）：没有 token")
+    except Exception as err:
+        logging.warning(f"预热失败（忽略，改为实时解）：{err}")
     precise_sleep_until(fire_at)
     logging.info("★ 开始冲刺狂刷 ★")
     deadline = time.time() + RUN_SECONDS
@@ -145,12 +150,15 @@ def exe_sprint_reserve(client, times, roomid, seatid, action, fire_at, prep_at):
                     fresh = client.prepare_packet(times, roomid, seat, action)
                     ok, _msg = client.fire_packet(fresh, action, f"第{attempt}轮")
                 if ok:
-                    logging.info(f"预约成功！座位 {seat}  完成，共尝试 {attempt} 轮")
+                    logging.info(f"预约成功！座位 {seat}  {times[0]}-{times[1]}  {day}")
+                    logging.info(f"完成，共尝试 {attempt} 轮")
                     return True
             except Exception as err:
                 logging.warning(f"座位 {seat} 尝试异常：{err}")
         time.sleep(SLEEPTIME)
-    logging.error(f"在 {RUN_SECONDS}s 内未成功，共 {attempt} 轮")
+    logging.error(
+        f"在 {RUN_SECONDS}s 内未成功，共 {attempt} 轮。请检查座位号/时间/是否已到开放时间"
+    )
     return False
 
 
@@ -168,12 +176,6 @@ def create_reserve_clients(user_count):
     return clients
 
 
-def primary_seat(seatid):
-    if isinstance(seatid, (list, tuple)):
-        return str(seatid[0]).strip()
-    return str(seatid).strip()
-
-
 def login_user(client, username, password):
     if client.logged_in:
         return True
@@ -183,30 +185,6 @@ def login_user(client, username, password):
         logging.info(f"登录失败: {msg}")
         return False
     return True
-
-
-def two_shot_reserve(client, times, roomid, seatid, action, prepared_packet=None):
-    seat = primary_seat(seatid)
-    logging.info(f"两枪策略 座位 {seat} 第一枪预热包丢掉，第二枪现场做包")
-
-    packet1 = prepared_packet
-    if packet1 is None:
-        logging.warning("开火时预热包未就绪，跳过第一枪，避免现场做包拖到 15 秒")
-    else:
-        ok1, msg1 = client.fire_packet(packet1, action, "第一枪")
-        packet1 = None
-        if ok1:
-            logging.info("第一枪预约成功")
-            return True
-        logging.info(f"第一枪结束 msg={msg1}，丢掉预热包，现场做第二枪")
-
-    packet2 = client.prepare_packet(times, roomid, seat, action)
-    ok2, msg2 = client.fire_packet(packet2, action, "第二枪")
-    if ok2:
-        logging.info("第二枪预约成功")
-        return True
-    logging.info(f"第二枪未成功 msg={msg2}")
-    return False
 
 
 def login_and_reserve(
@@ -251,7 +229,8 @@ def login_and_reserve(
                 f"登录后等待 {POST_LOGIN_DELAY} 秒再预约"
                 )
                 time.sleep(POST_LOGIN_DELAY)
-            suc = two_shot_reserve(s, times, roomid, seatid, action)
+            now = time.time()
+            suc = exe_sprint_reserve(s, times, roomid, seatid, action, now, now)
             success_list[index] = suc
     return success_list, clients
 
@@ -267,24 +246,31 @@ def main(users, action=False):
             raise Exception("USERNAMES/PASSWORDS secrets missing")
 
         logging.info("GitHub Action 已启动，按安师大 exe 冲刺：lead=300ms run=6s sleep=0.1s")
+        # OpenCV/连接放在 19:20 做完，不能占开火前那几秒
+        clients = create_reserve_clients(len(users))
         sync_chaoxing_clock()
         t0_local, fire_at, prep_at = exe_fire_timestamps()
         logging.info(
             f"冲刺模式：开放 {OPEN_TIME}，服务器时钟偏差 {_CX_OFFSET:+.2f}s，"
             f"将于本机 {datetime.datetime.fromtimestamp(fire_at).strftime('%H:%M:%S.%f')[:-3]} 开火"
         )
-        precise_sleep_until(prep_at - 20)
-        sync_chaoxing_clock()
-        t0_local, fire_at, prep_at = exe_fire_timestamps()
-        logging.info("开始预约前预热并登录...")
-        clients = create_reserve_clients(len(users))
+        # 对齐 exe 截图：约 19:59:42 登录，不是等到做包前才登录
+        precise_sleep_until(t0_local - LOGIN_LEAD_SECONDS)
+        logging.info("开始登录...")
         for index, user in enumerate(users):
             username, password = (
                 usernames.split(",")[index].strip(),
                 passwords.split(",")[index].strip(),
             )
             if not login_user(clients[index], username, password):
-                logging.error(f"预热登录失败 index={index}")
+                logging.error(f"登录失败 index={index}")
+        # 登录后再对钟，和 exe 一样
+        sync_chaoxing_clock()
+        t0_local, fire_at, prep_at = exe_fire_timestamps()
+        logging.info(
+            f"冲刺模式：开放 {OPEN_TIME}，服务器时钟偏差 {_CX_OFFSET:+.2f}s，"
+            f"将于本机 {datetime.datetime.fromtimestamp(fire_at).strftime('%H:%M:%S.%f')[:-3]} 开火"
+        )
 
     if clients is None:
         clients = create_reserve_clients(len(users))
@@ -314,15 +300,15 @@ def main(users, action=False):
                 clients[index], times, roomid, seatid, action, fire_at, prep_at
             )
         else:
-            success_list[index] = two_shot_reserve(
-                clients[index], times, roomid, seatid, action
+            now = time.time()
+            success_list[index] = exe_sprint_reserve(
+                clients[index], times, roomid, seatid, action, now, now
             )
 
     print(f"time now {current_time}, success list {success_list}")
     if success_list and sum(success_list) == today_reservation_num:
         print("reserved successfully!")
         return
-    logging.info("两枪结束")
     return
 
 def debug(users, action=False):

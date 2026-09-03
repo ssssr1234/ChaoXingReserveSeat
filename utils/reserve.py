@@ -289,6 +289,8 @@ class reserve:
             if not isinstance(seat, str):
                 raise TypeError("every seatid must be a string, for example '006'")
             seat = seat.strip()
+            if seat.isdigit():
+                seat = seat.zfill(3)
             if seat and seat not in normalized:
                 normalized.append(seat)
 
@@ -346,7 +348,9 @@ class reserve:
             action=action,
             value=packet["algo"],
         )
-        logging.info(f"{label} 回包 success={ok} msg={msg}")
+        logging.info(
+            f"座位 {packet['seat']} 提交返回：success={ok} msg={msg}"
+        )
         return ok, msg
 
     def submit(

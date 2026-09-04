@@ -75,11 +75,11 @@ RUN_ONCE = True
 SLEEPTIME = 0.1  # 安师大 exe sleep_time
 ENDTIME = "20:02:00"
 OPEN_TIME = "20:00:00"
-SPRINT_LEAD_MS = 300  # 开放前 0.3 秒开火
-SPRINT_PREP_SECONDS = 4  # 等到 t0-4 秒才开始做第一座的包
+SPRINT_LEAD_MS = 300  # 开放前 0.3 秒开火；到点必须发，不等做包
+PACKET_BUILD_LEAD_SECONDS = 10  # GitHub 到超星做包约 6s，开火前 10s 开始做，避免拖过开火点
 RUN_SECONDS = 6  # 狂刷时长
 RESERVE_TIME = "20:00:00"
-LOGIN_LEAD_SECONDS = 20  # 对齐 exe：约 19:59:40 登录，再等到 t0-4 做包
+LOGIN_LEAD_SECONDS = 20  # 约 19:59:40 登录
 
 ENABLE_SLIDER = True
 MAX_ATTEMPT = 1
@@ -108,12 +108,12 @@ def exe_fire_timestamps():
     )
     t0_local = open_dt.timestamp() - _CX_OFFSET
     fire_at = t0_local - (SPRINT_LEAD_MS / 1000.0)
-    prep_at = t0_local - SPRINT_PREP_SECONDS
+    prep_at = fire_at - PACKET_BUILD_LEAD_SECONDS
     return t0_local, fire_at, prep_at
 
 
 def exe_sprint_reserve(client, times, roomid, seatid, action, fire_at, prep_at):
-    """安师大 exe run() 冲刺：等到 t0-4 做第一座包 → 等到开火 → 预热包只用一次 → 其余现场做包。"""
+    """先把第一座包做好，等到 fire_at（开放前 300ms）再发。做包不得拖过开火点。"""
     seats = client._normalize_seat_ids(seatid)
     day_delta = 1 if client.reserve_next_day else 0
     day = (
@@ -122,6 +122,10 @@ def exe_sprint_reserve(client, times, roomid, seatid, action, fire_at, prep_at):
     logging.info(
         f"目标 {day}  房间 {roomid}  座位 {seats}  时间 {times[0]}-{times[1]}"
     )
+    logging.info(
+        f"做包开始 {datetime.datetime.fromtimestamp(prep_at).strftime('%H:%M:%S.%f')[:-3]}，"
+        f"开火 {datetime.datetime.fromtimestamp(fire_at).strftime('%H:%M:%S.%f')[:-3]}"
+    )
     if time.time() < prep_at:
         precise_sleep_until(prep_at)
     prewarm = None
@@ -129,14 +133,20 @@ def exe_sprint_reserve(client, times, roomid, seatid, action, fire_at, prep_at):
     try:
         pkt = client.prepare_packet(times, roomid, first, action)
         if pkt:
-            logging.info(f"预热完成：座位 {first} 的 token/验证码已备好")
+            remain = fire_at - time.time()
+            logging.info(
+                f"预热完成：座位 {first} 的 token/验证码已备好，距开火 {remain:.3f}s"
+            )
+            if remain < 0:
+                logging.warning(f"做包拖过开火点 {-remain:.3f}s，包未在 300ms 偏移打出")
             prewarm = pkt
         else:
             logging.warning("预热失败（忽略，改为实时解）：没有 token")
     except Exception as err:
         logging.warning(f"预热失败（忽略，改为实时解）：{err}")
     precise_sleep_until(fire_at)
-    logging.info("★ 开始冲刺狂刷 ★")
+    fire_err_ms = (time.time() - fire_at) * 1000.0
+    logging.info(f"★ 开始冲刺狂刷 ★ fire_error_ms={fire_err_ms:.1f}")
     deadline = time.time() + RUN_SECONDS
     attempt = 0
     while time.time() < deadline:

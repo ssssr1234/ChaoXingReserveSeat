@@ -190,6 +190,7 @@ class reserve:
             f"https://captcha.chaoxing.com/captcha/check/verification/result",
             params=params,
             headers=self.headers,
+            timeout=8,
         )
         text = response.text.replace(
             "jQuery33109180509737430778_1716381333117(", ""
@@ -220,7 +221,9 @@ class reserve:
             "d": "a",
             "b": "a",
         }
-        response = self.requests.get(url=url, params=params, headers=self.headers)
+        response = self.requests.get(
+            url=url, params=params, headers=self.headers, timeout=8
+        )
         content = response.text
 
         data = content.replace(
@@ -259,9 +262,8 @@ class reserve:
             "Upgrade-Insecure-Requests": "1",
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         }
-        bgc, tpc = self.requests.get(bg, headers=c_captcha_headers), self.requests.get(
-            tp, headers=c_captcha_headers
-        )
+        bgc = self.requests.get(bg, headers=c_captcha_headers, timeout=8)
+        tpc = self.requests.get(tp, headers=c_captcha_headers, timeout=8)
         bg, tp = bgc.content, tpc.content
         bg_img = cv2.imdecode(np.frombuffer(bg, np.uint8), cv2.IMREAD_COLOR)
         tp_img = cut_slide(tp)

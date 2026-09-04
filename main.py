@@ -76,7 +76,7 @@ SLEEPTIME = 0.1  # 安师大 exe sleep_time
 ENDTIME = "20:02:00"
 OPEN_TIME = "20:00:00"
 SPRINT_LEAD_MS = 300  # 开放前 0.3 秒开火；到点必须发，不等做包
-PACKET_BUILD_LEAD_SECONDS = 10  # GitHub 到超星做包约 6s，开火前 10s 开始做，避免拖过开火点
+PACKET_BUILD_LEAD_SECONDS = 7  # 包约 7s 过期（303）；开火前 7s 开始做，做好立刻等到 300ms 点再发
 RUN_SECONDS = 6  # 狂刷时长
 RESERVE_TIME = "20:00:00"
 LOGIN_LEAD_SECONDS = 20  # 约 19:59:40 登录
@@ -132,8 +132,13 @@ def exe_sprint_reserve(client, times, roomid, seatid, action, fire_at, prep_at):
     first = seats[0]
     try:
         pkt = client.prepare_packet(times, roomid, first, action)
+        remain = (fire_at - time.time()) if pkt else -1
+        # 6.8s 包龄已 303；太早做好就重做一包，避免坐到过期
+        if pkt and remain > 5.5:
+            logging.info(f"包过早就绪 {remain:.3f}s，重做以免过期")
+            pkt = client.prepare_packet(times, roomid, first, action)
+            remain = (fire_at - time.time()) if pkt else -1
         if pkt:
-            remain = fire_at - time.time()
             logging.info(
                 f"预热完成：座位 {first} 的 token/验证码已备好，距开火 {remain:.3f}s"
             )
